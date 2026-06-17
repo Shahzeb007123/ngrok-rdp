@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 360 # Keeps it running for the maximum 6 hours
+    timeout-minutes: 360
 
     steps:
       - name: Checkout Repository
@@ -22,28 +22,46 @@ jobs:
 
       - name: Configure and Enable Windows RDP
         run: |
-          # Enable Remote Desktop in Windows Registry
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          # Permit RDP through Windows Firewall
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          # Set explicit secure password for the administrator account
           $Password = ConvertTo-SecureString "P@ssw0rd2026!" -AsPlainText -Force
           Set-LocalUser -Name "runneradmin" -Password $Password
 
       - name: Start Ngrok TCP Tunnel
         run: |
-          Start-Process ngrok -ArgumentList "tcp 3389"
+          # Outfiles standard error to log.txt for tracking stability
+          Start-Process ngrok -ArgumentList "tcp 3389 --log=stdout" -RedirectStandardOutput "ngrok_log.txt"
 
-      - name: Fetch Connection Endpoint
+      - name: Fetch Connection Endpoint (With Retry Logic)
         run: |
-          Start-Sleep -Seconds 15
+          Write-Host "Waiting for Ngrok tunnel to initialize..."
+          $MaxAttempts = 10
+          $Attempt = 1
+          $TunnelInfo = $null
+
+          while ($null -eq $TunnelInfo -and $Attempt -le $MaxAttempts) {
+              try {
+                  Start-Sleep -Seconds 5
+                  $TunnelInfo = Invoke-RestMethod -Uri http://127.0.0 -ErrorAction Stop
+              } catch {
+                  Write-Host "Attempt $Attempt/$MaxAttempts: Ngrok API not ready yet. Retrying..."
+                  $Attempt++
+              }
+          }
+
+          if ($null -eq $TunnelInfo -or $null -eq $TunnelInfo.tunnels.public_url) {
+              Write-Error "Failed to fetch tunnel endpoint from Ngrok API."
+              Write-Host "==== NGROK LOG OUTPUT ===="
+              Get-Content ngrok_log.txt
+              exit 1
+          }
+
+          $PublicUrl = $TunnelInfo.tunnels[0].public_url
+          $CleanUrl = $PublicUrl -replace "tcp://", ""
+          
           Write-Host "===================================================="
           Write-Host "      YOUR REMOTE DESKTOP CONNECTION INFO"
           Write-Host "===================================================="
-          # Fetch the active tunnel endpoint directly from Ngrok's agent API
-          $TunnelInfo = Invoke-RestMethod -Uri http://127.0.0
-          $PublicUrl = $TunnelInfo.tunnels.public_url
-          $CleanUrl = $PublicUrl -replace "tcp://", ""
           Write-Host "RDP Address: $CleanUrl"
           Write-Host "Username   : runneradmin"
           Write-Host "Password   : P@ssw0rd2026!"
@@ -51,7 +69,6 @@ jobs:
 
       - name: Keep Alive Loop
         run: |
-          # Prevents the GitHub Runner from closing immediately
           $loop = $true
           while($loop) {
               Start-Sleep -Seconds 60
